@@ -1,0 +1,24 @@
+# Working notes — scratchpad, not part of the project
+PLAN.MD
+
+# Build
+build/
+*.o
+*.out
+*.dSYM/
+crnsim
+
+# Scratch simulation output — regenerated on every run, can be large
+data/*.csv
+
+# ...but the canonical outputs behind the committed figures ARE tracked:
+!data/samples/
+!data/samples/*.csv
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
