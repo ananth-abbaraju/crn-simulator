@@ -19,10 +19,10 @@ void usage() {
 R"(crnsim -- stochastic simulation of chemical reaction networks
 
 Usage:
-  crnsim [--network NAME] [options]
+  crnsim [--network NAME|FILE] [options]
 
 Network:
-  --network NAME        built-in network name (default: lotka-volterra)
+  --network NAME|FILE   built-in name, or a path to a .crn file (default: lotka-volterra)
   --list                list built-in networks and exit
   --t-end T             simulation horizon (default: per-network)
   --seed N              RNG seed (default: 1)
@@ -34,6 +34,7 @@ Output:
 Examples:
   crnsim --network lotka-volterra --out data/lv.csv
   crnsim --network approximate-majority --seed 3 --out data/am.csv
+  crnsim --network networks/brusselator.crn --sample-dt 0.01 --out data/br.csv
 )";
 }
 

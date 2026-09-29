@@ -31,6 +31,18 @@ def run(*args):
     return proc.stdout, proc.stderr
 
 
+def net(text, name="t"):
+    """Write a throwaway .crn file and return its path.
+
+    Most tests below want a network small enough to have a known answer, which
+    is exactly what the .crn parser is for.
+    """
+    path = os.path.join(TMP, f"{name}.crn")
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
 def out(name):
     return os.path.join(TMP, name)
 
@@ -89,6 +101,13 @@ def test_absorbing_state_stops_the_run():
         f"expected a consensus state, got X={last['X']} Y={last['Y']} B={last['B']}"
 
 
+def test_absorbing_at_t_zero():
+    """A network with nothing to fire must stop at t = 0, not spin."""
+    path = net("tend 100\ninit X=0\nX -> 0 ; k = 1\n")
+    _, err = run("--network", path, "--out", out("z.csv"))
+    assert "absorbing state reached at t = 0" in err, err
+
+
 # --- reproducibility -------------------------------------------------------
 
 def test_same_seed_same_trajectory():
@@ -111,6 +130,46 @@ def test_unknown_network_is_an_error():
     proc = subprocess.run([SIM, "--network", "nope"], capture_output=True, text=True)
     assert proc.returncode != 0
     assert "lotka-volterra" in proc.stderr, "error should list the built-ins"
+
+
+# --- the .crn parser -------------------------------------------------------
+
+def test_parser_handles_comments_and_forms():
+    path = net(
+        "# a comment\n"
+        "name custom     # trailing comment\n"
+        "tend 3\n"
+        "\n"
+        "init A=10 B=5\n"
+        "0      -> A      ; k = 1.5\n"
+        "rxn 2A + B -> 3A ; k = 2e-3\n"
+        "A -> 0 ; k=0.25\n",
+        "parsed")
+    _, err = run("--network", path, "--t-end", 0, "--out", out("c.csv"))
+    assert "network: custom" in err, err
+    assert "A=10" in err and "B=5" in err, err
+    assert "2A + B -> 3A   k = 0.002" in err, err
+    assert list(pd.read_csv(out("c.csv")).columns) == ["t", "A", "B"]
+
+
+def test_parser_reports_the_failing_line():
+    path = net("init X=1\nX -> ; k = 1\nY -> 0\n", "bad")
+    proc = subprocess.run([SIM, "--network", path], capture_output=True, text=True)
+    assert proc.returncode != 0, "expected a nonzero exit"
+    assert ":3:" in proc.stderr, f"expected the failing line number: {proc.stderr}"
+
+
+def test_parser_reads_the_brusselator():
+    """The shipped example file parses and its trimolecular step fires."""
+    path = os.path.join(ROOT, "networks", "brusselator.crn")
+    _, err = run("--network", path, "--t-end", 40, "--sample-dt", 0.05,
+                 "--seed", 1, "--out", out("br.csv"))
+    assert "2X + Y -> 3X" in err, err
+
+    df = pd.read_csv(out("br.csv"))
+    # A limit cycle, not a fixed point: the oscillation has to be wide.
+    assert df["X"].max() > 4 * df["X"].min(), \
+        f"X ranged only over {df['X'].min()}..{df['X'].max()}"
 
 
 def test_grid_sampling_matches_the_horizon():

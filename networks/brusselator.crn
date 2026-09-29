@@ -1,0 +1,28 @@
+# Brusselator -- the textbook oscillating CRN.
+#
+#   A       -> X
+#   2X + Y  -> 3X
+#   B + X   -> Y + D
+#   X       -> E
+#
+# A and B are chemostats and D, E are sinks, so all four are folded away: the
+# first reaction becomes a zeroth-order influx and the third a decay of X into
+# Y. What is left is the two-species core.
+#
+# The trimolecular step is the reason this network is here: it is the only one
+# in the repo that puts two molecules of the same species on the left, so it
+# exercises the k * n(n-1)/2 propensity branch that A + B -> ... never reaches.
+#
+# Rate constants are written for a system volume of 200 (concentration A = 1,
+# B = 3). B > 1 + A^2 puts the fixed point at (200, 600) outside its stability
+# region, so the system settles onto a limit cycle instead.
+
+name brusselator
+tend 40
+
+init X=200 Y=400
+
+0      -> X   ; k = 200
+2X + Y -> 3X  ; k = 5e-5
+X      -> Y   ; k = 3
+X      -> 0   ; k = 1

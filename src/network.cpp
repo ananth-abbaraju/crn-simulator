@@ -1,7 +1,9 @@
 #include "network.hpp"
 
 #include <cctype>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -138,13 +140,94 @@ std::vector<std::string> builtin_names() {
     return {"lotka-volterra", "approximate-majority"};
 }
 
+// A .crn file is the same reaction syntax the built-ins are written in, one
+// reaction per line, plus `name`, `tend` and `init` directives. Anything after
+// a '#' is a comment.
+Network parse_crn(const std::string& text, const std::string& origin) {
+    Network n;
+    n.name = origin;
+    std::map<std::string, std::size_t> index;
+    std::vector<std::pair<std::string, Count>> init;
+
+    std::istringstream in(text);
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line = line.substr(0, hash);
+        line = trim(line);
+        if (line.empty()) continue;
+
+        try {
+            if (line.rfind("name", 0) == 0 && (line.size() == 4 || std::isspace(static_cast<unsigned char>(line[4])))) {
+                n.name = trim(line.substr(4));
+                continue;
+            }
+            if (line.rfind("tend", 0) == 0 && (line.size() == 4 || std::isspace(static_cast<unsigned char>(line[4])))) {
+                n.suggested_t_end = std::stod(trim(line.substr(4)));
+                continue;
+            }
+            if (line.rfind("init", 0) == 0 && (line.size() == 4 || std::isspace(static_cast<unsigned char>(line[4])))) {
+                std::istringstream ts(line.substr(4));
+                std::string tok;
+                while (ts >> tok) {
+                    const auto eq = tok.find('=');
+                    if (eq == std::string::npos)
+                        throw std::runtime_error("expected SPECIES=COUNT, got '" + tok + "'");
+                    init.emplace_back(trim(tok.substr(0, eq)), std::stoll(tok.substr(eq + 1)));
+                }
+                continue;
+            }
+            // reaction: "LHS -> RHS ; k = VALUE"  (the leading `rxn` is optional)
+            std::string body = line;
+            if (body.rfind("rxn", 0) == 0) body = trim(body.substr(3));
+            const auto semi = body.rfind(';');
+            if (semi == std::string::npos)
+                throw std::runtime_error("reaction needs a '; k = ...' rate clause");
+            std::string rate = trim(body.substr(semi + 1));
+            if (rate.rfind("k", 0) == 0) rate = trim(rate.substr(1));
+            if (!rate.empty() && rate[0] == '=') rate = trim(rate.substr(1));
+            const double k = std::stod(rate);
+
+            const std::string expr = body.substr(0, semi);
+            const auto arrow = expr.find("->");
+            if (arrow == std::string::npos)
+                throw std::runtime_error("reaction needs '->'");
+            n.reactions.push_back(make_reaction(expr.substr(0, arrow),
+                                                expr.substr(arrow + 2), k, index, n.species));
+        } catch (const std::exception& e) {
+            throw std::runtime_error(origin + ":" + std::to_string(lineno) + ": " + e.what());
+        }
+    }
+
+    if (n.reactions.empty())
+        throw std::runtime_error(origin + ": no reactions found");
+
+    n.x0.assign(n.species.size(), 0);
+    for (const auto& [sp, c] : init) {
+        auto it = index.find(sp);
+        if (it == index.end())
+            throw std::runtime_error(origin + ": initial count for unknown species '" + sp + "'");
+        n.x0[it->second] = c;
+    }
+    n.finalize();
+    return n;
+}
+
 Network load_network(const std::string& spec) {
     if (spec == "lotka-volterra" || spec == "lv") return lotka_volterra();
     if (spec == "approximate-majority" || spec == "am") return approximate_majority();
 
-    std::string msg = "unknown network '" + spec + "'. built-ins:";
-    for (const auto& b : builtin_names()) msg += " " + b;
-    throw std::runtime_error(msg);
+    std::ifstream f(spec);
+    if (!f) {
+        std::string msg = "unknown network '" + spec + "' (not a built-in name, and no such file). built-ins:";
+        for (const auto& b : builtin_names()) msg += " " + b;
+        throw std::runtime_error(msg);
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return parse_crn(ss.str(), spec);
 }
 
 } // namespace crn
