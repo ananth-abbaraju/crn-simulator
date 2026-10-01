@@ -10,11 +10,13 @@ known independently -- a conservation law, an absorbing state, a repeated seed -
 rather than against a previous run of the simulator.
 """
 
+import math
 import os
 import subprocess
 import sys
 import tempfile
 
+import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +60,41 @@ def check(name, fn):
         print(f"ERROR {name}\n      {type(e).__name__}: {e}")
     else:
         print(f"ok    {name}")
+
+
+# --- the deterministic integrator ------------------------------------------
+
+def test_rk4_matches_closed_form():
+    """Pure decay integrates to 1000 * exp(-t); RK4 must land on it."""
+    path = net("tend 5\ninit X=1000\nX -> 0 ; k = 1\n")
+    run("--network", path, "--ode-out", out("o.csv"),
+        "--ode-step", 0.001, "--ode-sample-dt", 0.1)
+    df = pd.read_csv(out("o.csv"))
+    exact = 1000 * np.exp(-df["t"].to_numpy())
+    rel = np.abs(df["X"] - exact) / np.maximum(exact, 1e-12)
+    assert rel.max() < 1e-9, f"worst relative error {rel.max():.3g}"
+
+
+def test_rk4_is_fourth_order():
+    """Halving the step must cut the error by about 2^4."""
+    errs = []
+    for h in (0.2, 0.1):
+        path = net("tend 2\ninit X=1000\nX -> 0 ; k = 1\n")
+        run("--network", path, "--ode-out", out(f"o{h}.csv"),
+            "--ode-step", h, "--ode-sample-dt", 2.0)
+        df = pd.read_csv(out(f"o{h}.csv"))
+        errs.append(abs(df["X"].iloc[-1] - 1000 * math.exp(-2.0)))
+    ratio = errs[0] / max(errs[1], 1e-300)
+    assert 10 < ratio < 24, f"error ratio {ratio:.1f}, expected ~16 for 4th order"
+
+
+def test_ode_respects_the_conservation_law():
+    """The integrator reads the same stoichiometry, so it conserves the same sum."""
+    run("--network", "approximate-majority", "--ode-out", out("amo.csv"))
+    df = pd.read_csv(out("amo.csv"))
+    total = df["X"] + df["Y"] + df["B"]
+    assert (total - 190).abs().max() < 1e-6, \
+        f"total drifts by {(total - 190).abs().max():.3g}"
 
 
 # --- invariants ------------------------------------------------------------

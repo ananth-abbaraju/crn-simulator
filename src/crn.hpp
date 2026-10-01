@@ -1,7 +1,8 @@
 // Core chemical reaction network types.
 //
-// A network is stored as dense multiplicity vectors indexed by species, so one
-// propensity expression covers every reaction with no special-casing.
+// A network is stored as dense multiplicity vectors indexed by species, so the
+// same struct serves the stochastic propensity and the deterministic flux with
+// no special-casing per reaction.
 #pragma once
 
 #include <string>
@@ -55,6 +56,21 @@ inline double propensity(const Reaction& r, const std::vector<Count>& x) {
         for (int j = 2; j <= m; ++j) a /= static_cast<double>(j);
     }
     return a;
+}
+
+// Deterministic mass-action flux, the large-volume limit of the propensity
+// above: the falling factorial n(n-1)...(n-m+1) becomes x^m, and the 1/m!
+// combinatorial factor survives.
+inline double flux(const Reaction& r, const std::vector<double>& x) {
+    double f = r.k;
+    for (std::size_t s = 0; s < r.reactants.size(); ++s) {
+        const int m = r.reactants[s];
+        if (m == 0) continue;
+        const double n = x[s] > 0.0 ? x[s] : 0.0;
+        for (int j = 0; j < m; ++j) f *= n;
+        for (int j = 2; j <= m; ++j) f /= static_cast<double>(j);
+    }
+    return f;
 }
 
 } // namespace crn

@@ -16,6 +16,11 @@
 # Rate constants are written for a system volume of 200 (concentration A = 1,
 # B = 3). B > 1 + A^2 puts the fixed point at (200, 600) outside its stability
 # region, so the system settles onto a limit cycle instead.
+#
+# The initial condition below sits off that fixed point so the deterministic
+# solution spirals out to the cycle visibly. Set it to exactly X=200 Y=600 and
+# the ODE stays frozen there forever while the SSA still oscillates -- the
+# fixed point is unstable, and only noise can leave it.
 
 name brusselator
 tend 40

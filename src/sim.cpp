@@ -12,7 +12,7 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 void push_row(Trajectory& tr, double t, const std::vector<Count>& x) {
     tr.t.push_back(t);
-    tr.x.insert(tr.x.end(), x.begin(), x.end());
+    for (Count c : x) tr.x.push_back(static_cast<double>(c));
 }
 
 } // namespace
@@ -25,6 +25,7 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
     SsaResult res;
     res.quiescent_time = kNaN;
     res.traj.n_species = S;
+    res.traj.integral = true;
 
     std::vector<Count> x = net.x0;
     std::vector<double> a(R, 0.0);
@@ -102,6 +103,63 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
 
     res.final_state = x;
     return res;
+}
+
+Trajectory run_rk4(const Network& net, double t_end, double h, double sample_dt) {
+    const std::size_t S = net.n_species();
+    const std::size_t R = net.reactions.size();
+
+    std::vector<double> x(S), k1(S), k2(S), k3(S), k4(S), tmp(S);
+    for (std::size_t s = 0; s < S; ++s) x[s] = static_cast<double>(net.x0[s]);
+
+    auto deriv = [&](const std::vector<double>& state, std::vector<double>& out) {
+        std::fill(out.begin(), out.end(), 0.0);
+        for (std::size_t j = 0; j < R; ++j) {
+            const double f = flux(net.reactions[j], state);
+            if (f == 0.0) continue;
+            const Reaction& r = net.reactions[j];
+            for (std::size_t s = 0; s < S; ++s)
+                if (r.net[s] != 0) out[s] += r.net[s] * f;
+        }
+    };
+
+    // Integration is in doubles throughout; the recorded trajectory keeps them
+    // as doubles too, and only the CSV writer decides on formatting.
+    Trajectory tr;
+    tr.n_species = S;
+    std::vector<double> out_x;
+
+    double t = 0.0;
+    const double dt_out = sample_dt > 0.0 ? sample_dt : h;
+    double next_out = dt_out;
+
+    tr.t.push_back(0.0);
+    out_x.insert(out_x.end(), x.begin(), x.end());
+
+    while (t < t_end) {
+        const double dt = std::min(h, t_end - t);
+        if (dt <= 0.0) break;
+
+        deriv(x, k1);
+        for (std::size_t s = 0; s < S; ++s) tmp[s] = x[s] + 0.5 * dt * k1[s];
+        deriv(tmp, k2);
+        for (std::size_t s = 0; s < S; ++s) tmp[s] = x[s] + 0.5 * dt * k2[s];
+        deriv(tmp, k3);
+        for (std::size_t s = 0; s < S; ++s) tmp[s] = x[s] + dt * k3[s];
+        deriv(tmp, k4);
+        for (std::size_t s = 0; s < S; ++s)
+            x[s] += dt / 6.0 * (k1[s] + 2.0 * k2[s] + 2.0 * k3[s] + k4[s]);
+        t += dt;
+
+        while (next_out <= t + 1e-12 && next_out <= t_end + 1e-12) {
+            tr.t.push_back(next_out);
+            out_x.insert(out_x.end(), x.begin(), x.end());
+            next_out += dt_out;
+        }
+    }
+
+    tr.x = std::move(out_x);
+    return tr;
 }
 
 } // namespace crn
