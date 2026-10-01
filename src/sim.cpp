@@ -1,9 +1,11 @@
 #include "sim.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <random>
+#include <thread>
 
 namespace crn {
 namespace {
@@ -18,11 +20,12 @@ void push_row(Trajectory& tr, double t, const std::vector<Count>& x) {
 } // namespace
 
 SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
-                  double sample_dt) {
+                  double sample_dt, bool record) {
     const std::size_t S = net.n_species();
     const std::size_t R = net.reactions.size();
 
     SsaResult res;
+    res.first_zero.assign(S, kNaN);
     res.quiescent_time = kNaN;
     res.traj.n_species = S;
     res.traj.integral = true;
@@ -33,11 +36,16 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(0.0, 1.0);
 
+    for (std::size_t s = 0; s < S; ++s)
+        if (x[s] == 0) res.first_zero[s] = 0.0;
+
     double t = 0.0;
     // Index of the next grid point to emit; grid point i is at i * sample_dt.
     std::size_t next_grid = 0;
-    push_row(res.traj, 0.0, x);
-    if (sample_dt > 0.0) next_grid = 1;
+    if (record) {
+        push_row(res.traj, 0.0, x);
+        if (sample_dt > 0.0) next_grid = 1;
+    }
 
     while (t < t_end) {
         double a0 = 0.0;
@@ -58,7 +66,7 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
 
         // The state is constant on [t, t_next), so all grid points in that
         // half-open interval take the current counts.
-        if (sample_dt > 0.0) {
+        if (record && sample_dt > 0.0) {
             const double limit = std::min(t_next, t_end);
             while (next_grid * sample_dt < limit) {
                 push_row(res.traj, next_grid * sample_dt, x);
@@ -82,22 +90,25 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
         }
 
         const Reaction& r = net.reactions[j];
-        for (std::size_t s = 0; s < S; ++s)
-            if (r.net[s] != 0) x[s] += r.net[s];
+        for (std::size_t s = 0; s < S; ++s) {
+            if (r.net[s] == 0) continue;
+            x[s] += r.net[s];
+            if (x[s] == 0 && std::isnan(res.first_zero[s])) res.first_zero[s] = t;
+        }
         ++res.events;
 
-        if (sample_dt == 0.0) push_row(res.traj, t, x);
+        if (record && sample_dt == 0.0) push_row(res.traj, t, x);
     }
 
     // Pad the grid out to t_end. Both ways out of the loop above leave the
     // counts frozen -- the horizon, or an absorbing state that can never fire
     // again -- so the padding is the true trajectory, not an extrapolation.
-    if (sample_dt > 0.0) {
+    if (record && sample_dt > 0.0) {
         while (next_grid * sample_dt <= t_end) {
             push_row(res.traj, next_grid * sample_dt, x);
             ++next_grid;
         }
-    } else if (!res.traj.t.empty() && res.traj.t.back() < t_end) {
+    } else if (record && !res.traj.t.empty() && res.traj.t.back() < t_end) {
         push_row(res.traj, t_end, x);
     }
 
@@ -160,6 +171,95 @@ Trajectory run_rk4(const Network& net, double t_end, double h, double sample_dt)
 
     tr.x = std::move(out_x);
     return tr;
+}
+
+EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
+                           std::size_t n_runs, unsigned n_threads, double grid_dt) {
+    const std::size_t S = net.n_species();
+
+    EnsembleStats st;
+    st.n_runs = n_runs;
+    st.n_species = S;
+    st.grid_dt = grid_dt;
+    st.seeds.resize(n_runs);
+    st.quiescent_time.resize(n_runs);
+    st.first_zero.resize(n_runs * S);
+    st.final_state.resize(n_runs * S);
+    st.events.resize(n_runs);
+
+    std::size_t G = 0;
+    if (grid_dt > 0.0) {
+        G = static_cast<std::size_t>(std::floor(t_end / grid_dt)) + 1;
+        st.grid_t.resize(G);
+        for (std::size_t i = 0; i < G; ++i) st.grid_t[i] = i * grid_dt;
+    }
+
+    if (n_threads == 0) n_threads = 1;
+    n_threads = static_cast<unsigned>(std::min<std::size_t>(n_threads, std::max<std::size_t>(n_runs, 1)));
+    st.threads = n_threads;
+
+    // Each thread accumulates into its own sums; merged once at the end. No
+    // locking in the hot loop, and each run has its own RNG stream.
+    std::vector<std::vector<double>> sum(n_threads), sumsq(n_threads);
+    for (unsigned w = 0; w < n_threads; ++w) {
+        sum[w].assign(G * S, 0.0);
+        sumsq[w].assign(G * S, 0.0);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto worker = [&](unsigned w) {
+        for (std::size_t i = w; i < n_runs; i += n_threads) {
+            const std::uint64_t s = seed + static_cast<std::uint64_t>(i);
+            SsaResult r = run_ssa(net, t_end, s, grid_dt, grid_dt > 0.0);
+
+            st.seeds[i] = s;
+            st.quiescent_time[i] = r.quiescent_time;
+            st.events[i] = r.events;
+            const auto off = static_cast<std::ptrdiff_t>(i * S);
+            std::copy(r.first_zero.begin(), r.first_zero.end(), st.first_zero.begin() + off);
+            std::copy(r.final_state.begin(), r.final_state.end(), st.final_state.begin() + off);
+
+            for (std::size_t g = 0; g < G && g < r.traj.rows(); ++g) {
+                const double* row = r.traj.row(g);
+                for (std::size_t sp = 0; sp < S; ++sp) {
+                    const double v = row[sp];
+                    sum[w][g * S + sp] += v;
+                    sumsq[w][g * S + sp] += v * v;
+                }
+            }
+        }
+    };
+
+    if (n_threads == 1) {
+        worker(0);
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(n_threads);
+        for (unsigned w = 0; w < n_threads; ++w) pool.emplace_back(worker, w);
+        for (auto& th : pool) th.join();
+    }
+
+    st.wall_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    if (G > 0) {
+        st.mean.assign(G * S, 0.0);
+        st.sd.assign(G * S, 0.0);
+        const double n = static_cast<double>(n_runs);
+        for (std::size_t i = 0; i < G * S; ++i) {
+            double s1 = 0.0, s2 = 0.0;
+            for (unsigned w = 0; w < n_threads; ++w) {
+                s1 += sum[w][i];
+                s2 += sumsq[w][i];
+            }
+            const double m = s1 / n;
+            st.mean[i] = m;
+            const double var = n > 1.0 ? (s2 - n * m * m) / (n - 1.0) : 0.0;
+            st.sd[i] = std::sqrt(var > 0.0 ? var : 0.0);
+        }
+    }
+
+    return st;
 }
 
 } // namespace crn

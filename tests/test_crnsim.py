@@ -62,6 +62,104 @@ def check(name, fn):
         print(f"ok    {name}")
 
 
+def approx(actual, expected, tol, what):
+    assert abs(actual - expected) <= tol, \
+        f"{what}: got {actual:.6g}, expected {expected:.6g} +/- {tol:.3g}"
+
+
+# --- propensity forms ------------------------------------------------------
+#
+# Each of these pins one branch of the propensity function by measuring the
+# mean waiting time to the first (and only) reaction, which is 1/a exactly.
+
+def first_event_mean(reactions, init, runs=4000, seed=11):
+    """Mean waiting time for a network in which exactly one reaction can ever fire.
+
+    Each network below is rigged so that firing once empties a reactant and
+    leaves an absorbing state, which makes the recorded quiescent time the
+    waiting time for a single exponential clock of rate a -- mean exactly 1/a.
+    """
+    path = net(f"tend 1000\ninit {init}\n{reactions}\n")
+    run("--network", path, "--ensemble", runs, "--seed", seed,
+        "--ensemble-out", out("e.csv"))
+    df = pd.read_csv(out("e.csv"))
+    assert df["quiescent_time"].notna().all(), "expected every run to absorb"
+    assert (df["events"] == 1).all(), \
+        f"the network must admit exactly one event, saw {sorted(df['events'].unique())}"
+    return df["quiescent_time"].mean(), df["quiescent_time"].std() / math.sqrt(runs)
+
+
+def test_unimolecular():
+    # X -> 0 with k = 2 and one molecule: a = 2, mean waiting time 1/2.
+    m, se = first_event_mean("X -> 0 ; k = 2", "X=1")
+    approx(m, 0.5, 4 * se, "mean time to X -> 0")
+
+
+def test_bimolecular_distinct():
+    # X + Y -> 0 with n_X = 3, n_Y = 1: a = k * 3 * 1 = 3, mean 1/3.
+    m, se = first_event_mean("X + Y -> 0 ; k = 1", "X=3 Y=1")
+    approx(m, 1.0 / 3.0, 4 * se, "mean time to X + Y -> 0")
+
+
+def test_bimolecular_same_species():
+    # 2X + Y -> 0 with n_X = 4, n_Y = 1: a = k * C(4,2) = 6, mean 1/6.
+    # Getting this branch wrong gives k * 4 * 3 = 12 or k * 4 * 4 = 16 instead,
+    # both of which this test separates from 6 by many standard errors. The
+    # spectator Y is there only to make the state absorbing after one event.
+    m, se = first_event_mean("2X + Y -> 0 ; k = 1", "X=4 Y=1")
+    approx(m, 1.0 / 6.0, 4 * se, "mean time to 2X + Y -> 0")
+
+
+def test_trimolecular_same_species():
+    # 3X + Y -> 0 with n_X = 5: a = k * C(5,3) = 10, mean 1/10.
+    m, se = first_event_mean("3X + Y -> 0 ; k = 1", "X=5 Y=1")
+    approx(m, 0.1, 4 * se, "mean time to 3X + Y -> 0")
+
+
+def test_zeroth_order():
+    # 0 -> X has a constant propensity k, independent of any count.
+    path = net("tend 10\ninit X=0\n0 -> X ; k = 7\n")
+    run("--network", path, "--ensemble", 2000, "--seed", 5,
+        "--ensemble-out", out("z2.csv"))
+    df = pd.read_csv(out("z2.csv"))
+    # Poisson(7 * 10): mean 70, and the count equals the event count.
+    approx(df["final_X"].mean(), 70.0, 4 * math.sqrt(70.0 / 2000), "mean X at t=10")
+    approx(df["final_X"].var(), 70.0, 8.0, "var X at t=10")
+
+
+# --- the SSA is exact ------------------------------------------------------
+
+def test_ssa_matches_master_equation():
+    """Pure decay has a closed-form solution; the SSA must reproduce it.
+
+    X -> 0 with rate k is a binomial thinning: at time t each of the N0 initial
+    molecules survives independently with probability exp(-kt), so the count is
+    Binomial(N0, exp(-kt)) -- mean and variance both known exactly.
+    """
+    path = net("tend 1\ninit X=1000\nX -> 0 ; k = 1\n")
+    run("--network", path, "--ensemble", 2000, "--seed", 99,
+        "--stats-out", out("s.csv"), "--grid-dt", 0.1)
+    df = pd.read_csv(out("s.csv"))
+    p = np.exp(-df["t"].to_numpy())
+    mean = 1000 * p
+    sd = np.sqrt(1000 * p * (1 - p))
+    # 2000 runs: the standard error on the mean is sd/sqrt(2000) <= 0.36.
+    assert np.abs(df["mean_X"] - mean).max() < 1.5, \
+        f"mean deviates by {np.abs(df['mean_X'] - mean).max():.3f}"
+    assert np.abs(df["sd_X"] - sd).max() < 0.8, \
+        f"sd deviates by {np.abs(df['sd_X'] - sd).max():.3f}"
+
+
+def test_thread_count_does_not_change_results():
+    """Each run owns its RNG stream, so the answer cannot depend on scheduling."""
+    for t in (1, 4):
+        run("--network", "lotka-volterra", "--t-end", 30, "--ensemble", 200,
+            "--seed", 7, "--threads", t, "--ensemble-out", out(f"t{t}.csv"))
+    a = pd.read_csv(out("t1.csv"))
+    b = pd.read_csv(out("t4.csv"))
+    pd.testing.assert_frame_equal(a, b)
+
+
 # --- the deterministic integrator ------------------------------------------
 
 def test_rk4_matches_closed_form():
