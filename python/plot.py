@@ -4,6 +4,8 @@
     python/plot.py data/lv.csv                            # trajectory
     python/plot.py trajectory data/lv.csv --ode data/lv_ode.csv -o figures/lv.png
     python/plot.py phase data/lv.csv --ode data/lv_ode.csv
+    python/plot.py scale --pair 1 data/lv.csv data/lv_ode.csv \
+                         --pair 25 data/lv_s25.csv data/lv_s25_ode.csv
 """
 
 import argparse
@@ -129,6 +131,54 @@ def cmd_phase(args):
     finish(fig, args.out, args.show)
 
 
+def cmd_scale(args):
+    """Small multiples across volume scalings: the deterministic limit arriving."""
+    pairs = args.pair
+    n = len(pairs)
+    fig, axes = plt.subplots(1, n, figsize=(4.0 * n, 3.8), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, (omega_s, ssa_path, ode_path) in zip(axes, pairs):
+        omega = float(omega_s)
+        ssa, species = read_traj(ssa_path)
+        ode, _ = read_traj(ode_path)
+        keep = [sp for sp in species if not args.species or sp in args.species]
+
+        for sp in keep:
+            c = style.color_for(sp, species.index(sp))
+            # Divide counts by the volume factor so every panel is in the same
+            # units. The deterministic curve is then identical across panels and
+            # only the noise around it changes -- which is the whole point.
+            ax.step(ssa["t"], ssa[sp] / omega, where="post", color=c, lw=0.9,
+                    alpha=0.9, label=sp, zorder=3)
+            ax.plot(ode["t"], ode[sp] / omega, color=c, lw=1.6, ls=(0, (5, 2)),
+                    alpha=0.95, zorder=4)
+
+        ax.set_xlabel("time")
+        ax.set_xlim(ssa["t"].min(), ssa["t"].max())
+        ax.set_ylim(bottom=0)
+        ax.set_title(f"Ω = {omega:g}", fontsize=10)
+        style.subtitle(ax, f"{int(round(ssa[keep[0]].iloc[0]))} {keep[0]} at t = 0")
+
+    for ax in axes:
+        headroom(ax, 1.22)
+
+    label = keep[0] if len(keep) == 1 else "species"
+    axes[0].set_ylabel(f"{label} concentration (count / Ω)")
+    # One series per panel needs no color legend -- the axis label names it.
+    if len(keep) > 1:
+        leg = axes[0].legend(loc="upper left", labelcolor=style.INK_2)
+        axes[0].add_artist(leg)
+    method_legend(axes[-1], True, loc="upper right")
+    # Clear of the panel titles, which sit above the axes, not inside them.
+    fig.suptitle(args.title or
+                 "The deterministic limit: same network, more molecules",
+                 x=0.0, y=1.06, ha="left", va="bottom", fontsize=12, color=style.INK)
+
+    finish(fig, args.out, args.show)
+
+
 def main():
     style.apply()
 
@@ -155,6 +205,13 @@ def main():
     ph.add_argument("--y")
     common(ph, "figures/phase.png")
     ph.set_defaults(func=cmd_phase)
+
+    sc = sub.add_parser("scale", help="small multiples across volume scalings")
+    sc.add_argument("--pair", nargs=3, action="append", metavar=("OMEGA", "SSA", "ODE"),
+                    required=True)
+    sc.add_argument("--species", nargs="*", default=None)
+    common(sc, "figures/scale.png")
+    sc.set_defaults(func=cmd_scale)
 
     # `plot.py data/lv.csv` -- the bare form, with `trajectory` implied.
     argv = sys.argv[1:]

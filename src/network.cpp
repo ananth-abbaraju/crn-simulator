@@ -1,6 +1,7 @@
 #include "network.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -134,6 +135,15 @@ void Network::finalize() {
         for (std::size_t s = 0; s < n; ++s)
             r.net[s] = r.products[s] - r.reactants[s];
     }
+}
+
+void rescale(Network& net, double omega) {
+    if (omega == 1.0) return;
+    if (omega <= 0.0) throw std::runtime_error("--scale must be positive");
+    for (auto& r : net.reactions)
+        r.k /= std::pow(omega, r.order() - 1);
+    for (auto& c : net.x0)
+        c = static_cast<Count>(std::llround(static_cast<double>(c) * omega));
 }
 
 std::vector<std::string> builtin_names() {

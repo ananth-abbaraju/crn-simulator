@@ -186,6 +186,22 @@ def test_rk4_is_fourth_order():
     assert 10 < ratio < 24, f"error ratio {ratio:.1f}, expected ~16 for 4th order"
 
 
+def test_volume_scaling_leaves_the_ode_invariant():
+    """--scale must not move the deterministic trajectory in concentration.
+
+    Counts go up by omega and each rate constant down by omega^(order-1), which
+    is exactly the transformation the mass-action ODE is invariant under. If the
+    exponent is wrong the two curves separate immediately.
+    """
+    for omega in (1, 50):
+        run("--network", "lotka-volterra", "--scale", omega, "--t-end", 10,
+            "--ode-out", out(f"v{omega}.csv"), "--ode-sample-dt", 0.1)
+    a = pd.read_csv(out("v1.csv"))
+    b = pd.read_csv(out("v50.csv"))
+    rel = np.abs(a["X"] - b["X"] / 50) / np.maximum(np.abs(a["X"]), 1.0)
+    assert rel.max() < 1e-4, f"worst relative drift {rel.max():.3g}"
+
+
 def test_ode_respects_the_conservation_law():
     """The integrator reads the same stoichiometry, so it conserves the same sum."""
     run("--network", "approximate-majority", "--ode-out", out("amo.csv"))

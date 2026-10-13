@@ -73,4 +73,11 @@ inline double flux(const Reaction& r, const std::vector<double>& x) {
     return f;
 }
 
+// Volume scaling. Multiplying counts by omega while dividing each rate
+// constant by omega^(order-1) leaves the deterministic trajectory unchanged in
+// concentration but shrinks relative fluctuations as 1/sqrt(omega). This is the
+// knob that makes the SSA and the ODE agree (large omega) or visibly diverge
+// (omega near 1).
+void rescale(Network& net, double omega);
+
 } // namespace crn

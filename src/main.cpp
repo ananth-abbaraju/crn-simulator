@@ -26,6 +26,9 @@ Usage:
 Network:
   --network NAME|FILE   built-in name, or a path to a .crn file (default: lotka-volterra)
   --list                list built-in networks and exit
+  --scale OMEGA         volume scaling: counts *= OMEGA, rate constants /= OMEGA^(order-1).
+                        Leaves the deterministic trajectory invariant and shrinks
+                        relative noise as 1/sqrt(OMEGA). (default: 1)
   --t-end T             simulation horizon (default: per-network)
   --seed N              RNG seed (default: 1)
 
@@ -47,6 +50,7 @@ Examples:
   crnsim --network lotka-volterra --out data/lv.csv --ode-out data/lv_ode.csv
   crnsim --network approximate-majority --seed 3 --out data/am.csv
   crnsim --network networks/brusselator.crn --sample-dt 0.01 --out data/br.csv
+  crnsim --network lotka-volterra --scale 25 --sample-dt 0.01 --out data/lv_omega25.csv
   crnsim --network lotka-volterra --ensemble 1000 --ensemble-out data/lv_ensemble.csv
 )";
 }
@@ -160,7 +164,7 @@ std::string need(int argc, char** argv, int& i) {
 int main(int argc, char** argv) try {
     std::string spec = "lotka-volterra";
     std::string out, ode_out, ensemble_out, stats_out;
-    double t_end = -1.0, sample_dt = 0.0;
+    double t_end = -1.0, scale = 1.0, sample_dt = 0.0;
     double ode_step = -1.0, ode_sample_dt = -1.0, grid_dt = -1.0;
     std::uint64_t seed = 1;
     std::size_t ensemble = 0;
@@ -182,6 +186,7 @@ int main(int argc, char** argv) try {
         else if (a == "--ensemble") ensemble = std::stoull(need(argc, argv, i));
         else if (a == "--threads") threads = static_cast<unsigned>(std::stoul(need(argc, argv, i)));
         else if (a == "--grid-dt") grid_dt = std::stod(need(argc, argv, i));
+        else if (a == "--scale") scale = std::stod(need(argc, argv, i));
         else if (a == "--t-end") t_end = std::stod(need(argc, argv, i));
         else if (a == "--sample-dt") sample_dt = std::stod(need(argc, argv, i));
         else if (a == "--ode-step") ode_step = std::stod(need(argc, argv, i));
@@ -191,6 +196,7 @@ int main(int argc, char** argv) try {
     }
 
     Network net = load_network(spec);
+    rescale(net, scale);
     if (t_end < 0.0) t_end = net.suggested_t_end;
     // Output intervals scale with the horizon, so a network that finishes in
     // 0.2 time units gets as many points as one that runs for 30.
