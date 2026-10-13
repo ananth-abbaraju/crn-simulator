@@ -46,6 +46,12 @@ Ensemble:
   --stats-out FILE      ensemble mean/sd on a grid
   --grid-dt DT          grid interval for --stats-out (default: t_end/600)
 
+Stopping:
+  --max-count N         abort a run if any species exceeds N (default: 1000000).
+                        Lotka-Volterra prey grows without bound once the predators
+                        die out, so t_end is otherwise never reached.
+  --max-events N        per-run reaction budget (default: 50000000)
+
 Examples:
   crnsim --network lotka-volterra --out data/lv.csv --ode-out data/lv_ode.csv
   crnsim --network approximate-majority --seed 3 --out data/am.csv
@@ -105,14 +111,17 @@ void write_ensemble(const std::string& path, const Network& net, const EnsembleS
     std::ofstream file;
     std::ostream& os = *open_out(path, file);
 
-    os << "run,seed,events,quiescent_time";
+    os << "run,seed,stop,events,stop_time,quiescent_time";
     for (const auto& s : net.species) os << ",first_zero_" << s;
     for (const auto& s : net.species) os << ",final_" << s;
     os << "\n";
 
     const std::size_t S = st.n_species;
     for (std::size_t i = 0; i < st.n_runs; ++i) {
-        os << i << "," << st.seeds[i] << "," << st.events[i] << ",";
+        os << i << "," << st.seeds[i] << "," << stop_name(st.stop[i]) << ","
+           << st.events[i] << ",";
+        write_field(os, st.stop_time[i]);
+        os << ",";
         write_field(os, st.quiescent_time[i]);
         for (std::size_t s = 0; s < S; ++s) {
             os << ",";
@@ -127,7 +136,7 @@ void write_stats(const std::string& path, const Network& net, const EnsembleStat
     std::ofstream file;
     std::ostream& os = *open_out(path, file);
 
-    os << "t";
+    os << "t,n";
     for (const auto& s : net.species) os << ",mean_" << s << ",sd_" << s;
     os << "\n";
 
@@ -135,10 +144,12 @@ void write_stats(const std::string& path, const Network& net, const EnsembleStat
     const std::size_t S = st.n_species;
     for (std::size_t g = 0; g < st.grid_t.size(); ++g) {
         std::snprintf(buf, sizeof buf, "%.6f", st.grid_t[g]);
-        os << buf;
+        os << buf << "," << static_cast<long long>(st.grid_n[g]);
         for (std::size_t s = 0; s < S; ++s) {
-            std::snprintf(buf, sizeof buf, ",%.6f,%.6f", st.mean[g * S + s], st.sd[g * S + s]);
-            os << buf;
+            os << ",";
+            write_field(os, st.mean[g * S + s]);
+            os << ",";
+            write_field(os, st.sd[g * S + s]);
         }
         os << "\n";
     }
@@ -168,6 +179,7 @@ int main(int argc, char** argv) try {
     double ode_step = -1.0, ode_sample_dt = -1.0, grid_dt = -1.0;
     std::uint64_t seed = 1;
     std::size_t ensemble = 0;
+    SsaLimits limits;
     unsigned threads = std::thread::hardware_concurrency();
     if (threads == 0) threads = 1;
 
@@ -186,6 +198,8 @@ int main(int argc, char** argv) try {
         else if (a == "--ensemble") ensemble = std::stoull(need(argc, argv, i));
         else if (a == "--threads") threads = static_cast<unsigned>(std::stoul(need(argc, argv, i)));
         else if (a == "--grid-dt") grid_dt = std::stod(need(argc, argv, i));
+        else if (a == "--max-count") limits.max_count = std::stoll(need(argc, argv, i));
+        else if (a == "--max-events") limits.max_events = std::stoull(need(argc, argv, i));
         else if (a == "--scale") scale = std::stod(need(argc, argv, i));
         else if (a == "--t-end") t_end = std::stod(need(argc, argv, i));
         else if (a == "--sample-dt") sample_dt = std::stod(need(argc, argv, i));
@@ -214,32 +228,34 @@ int main(int argc, char** argv) try {
             die("--ensemble needs --ensemble-out and/or --stats-out");
         const EnsembleStats st =
             run_ensemble(net, t_end, seed, ensemble, threads,
-                         stats_out.empty() ? 0.0 : grid_dt);
+                         stats_out.empty() ? 0.0 : grid_dt, limits);
 
         unsigned long long total_events = 0;
-        std::size_t absorbed = 0;
+        std::size_t by_stop[4] = {0, 0, 0, 0};
         for (std::size_t i = 0; i < st.n_runs; ++i) {
             total_events += st.events[i];
-            if (!std::isnan(st.quiescent_time[i])) ++absorbed;
+            ++by_stop[static_cast<int>(st.stop[i])];
         }
         std::cerr << "ensemble: " << st.n_runs << " runs on " << st.threads
                   << " threads in " << st.wall_seconds << " s\n"
                   << "  " << total_events << " reaction events ("
                   << static_cast<double>(total_events) / st.wall_seconds / 1e6
                   << "M events/s)\n"
-                  << "  " << absorbed << "/" << st.n_runs
-                  << " runs reached an absorbing state before t_end\n";
+                  << "  stopped:";
+        for (int k = 0; k < 4; ++k)
+            if (by_stop[k])
+                std::cerr << " " << stop_name(static_cast<Stop>(k)) << "=" << by_stop[k];
+        std::cerr << "\n";
 
         if (!ensemble_out.empty()) write_ensemble(ensemble_out, net, st);
         if (!stats_out.empty()) write_stats(stats_out, net, st);
     }
 
     if (!out.empty()) {
-        const SsaResult r = run_ssa(net, t_end, seed, sample_dt);
-        std::cerr << "ssa: " << r.events << " reaction events, " << r.traj.rows() << " rows";
-        if (!std::isnan(r.quiescent_time))
-            std::cerr << "; absorbing state reached at t = " << r.quiescent_time;
-        std::cerr << "\n";
+        const SsaResult r = run_ssa(net, t_end, seed, sample_dt, true, limits);
+        std::cerr << "ssa: " << r.events << " reaction events, " << r.traj.rows()
+                  << " rows, stopped on " << stop_name(r.stop)
+                  << " at t = " << r.stop_time << "\n";
         write_trajectory(out, net, r.traj);
     }
 

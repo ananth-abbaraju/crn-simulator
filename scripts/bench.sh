@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUNS=${RUNS:-1000}
-TEND=${TEND:-40}
+TEND=${TEND:-200}
 
 echo "$RUNS Lotka-Volterra trajectories to t = $TEND"
 echo

@@ -19,8 +19,18 @@ void push_row(Trajectory& tr, double t, const std::vector<Count>& x) {
 
 } // namespace
 
+const char* stop_name(Stop s) {
+    switch (s) {
+        case Stop::Horizon: return "horizon";
+        case Stop::Absorbing: return "absorbing";
+        case Stop::PopulationCap: return "population-cap";
+        case Stop::EventCap: return "event-cap";
+    }
+    return "?";
+}
+
 SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
-                  double sample_dt, bool record) {
+                  double sample_dt, bool record, SsaLimits limits) {
     const std::size_t S = net.n_species();
     const std::size_t R = net.reactions.size();
 
@@ -58,6 +68,12 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
         // divides by zero and the loop spins forever.
         if (a0 <= 0.0) {
             res.quiescent_time = t;
+            res.stop = Stop::Absorbing;
+            break;
+        }
+
+        if (res.events >= limits.max_events) {
+            res.stop = Stop::EventCap;
             break;
         }
 
@@ -76,6 +92,7 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
 
         if (t_next > t_end) {
             t = t_end;
+            res.stop = Stop::Horizon;
             break;
         }
         t = t_next;
@@ -90,28 +107,40 @@ SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
         }
 
         const Reaction& r = net.reactions[j];
+        bool blew_up = false;
         for (std::size_t s = 0; s < S; ++s) {
             if (r.net[s] == 0) continue;
             x[s] += r.net[s];
             if (x[s] == 0 && std::isnan(res.first_zero[s])) res.first_zero[s] = t;
+            if (x[s] > limits.max_count) blew_up = true;
         }
         ++res.events;
 
         if (record && sample_dt == 0.0) push_row(res.traj, t, x);
+
+        if (blew_up) {
+            res.stop = Stop::PopulationCap;
+            break;
+        }
     }
 
-    // Pad the grid out to t_end. Both ways out of the loop above leave the
-    // counts frozen -- the horizon, or an absorbing state that can never fire
-    // again -- so the padding is the true trajectory, not an extrapolation.
+    // Pad the grid out to t_end. In an absorbing state the counts are frozen
+    // forever, so the padding is the true trajectory, not an extrapolation --
+    // but only then. A run cut short by a cap has no trajectory past t, and
+    // padding it would quietly invent one.
+    const bool frozen = (res.stop == Stop::Horizon || res.stop == Stop::Absorbing);
     if (record && sample_dt > 0.0) {
-        while (next_grid * sample_dt <= t_end) {
-            push_row(res.traj, next_grid * sample_dt, x);
-            ++next_grid;
+        if (frozen) {
+            while (next_grid * sample_dt <= t_end) {
+                push_row(res.traj, next_grid * sample_dt, x);
+                ++next_grid;
+            }
         }
-    } else if (record && !res.traj.t.empty() && res.traj.t.back() < t_end) {
+    } else if (record && frozen && !res.traj.t.empty() && res.traj.t.back() < t_end) {
         push_row(res.traj, t_end, x);
     }
 
+    res.stop_time = t;
     res.final_state = x;
     return res;
 }
@@ -174,7 +203,8 @@ Trajectory run_rk4(const Network& net, double t_end, double h, double sample_dt)
 }
 
 EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
-                           std::size_t n_runs, unsigned n_threads, double grid_dt) {
+                           std::size_t n_runs, unsigned n_threads, double grid_dt,
+                           SsaLimits limits) {
     const std::size_t S = net.n_species();
 
     EnsembleStats st;
@@ -183,6 +213,8 @@ EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
     st.grid_dt = grid_dt;
     st.seeds.resize(n_runs);
     st.quiescent_time.resize(n_runs);
+    st.stop_time.resize(n_runs);
+    st.stop.resize(n_runs);
     st.first_zero.resize(n_runs * S);
     st.final_state.resize(n_runs * S);
     st.events.resize(n_runs);
@@ -201,9 +233,11 @@ EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
     // Each thread accumulates into its own sums; merged once at the end. No
     // locking in the hot loop, and each run has its own RNG stream.
     std::vector<std::vector<double>> sum(n_threads), sumsq(n_threads);
+    std::vector<std::vector<double>> cnt(n_threads);
     for (unsigned w = 0; w < n_threads; ++w) {
         sum[w].assign(G * S, 0.0);
         sumsq[w].assign(G * S, 0.0);
+        cnt[w].assign(G, 0.0);
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -211,10 +245,12 @@ EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
     auto worker = [&](unsigned w) {
         for (std::size_t i = w; i < n_runs; i += n_threads) {
             const std::uint64_t s = seed + static_cast<std::uint64_t>(i);
-            SsaResult r = run_ssa(net, t_end, s, grid_dt, grid_dt > 0.0);
+            SsaResult r = run_ssa(net, t_end, s, grid_dt, grid_dt > 0.0, limits);
 
             st.seeds[i] = s;
             st.quiescent_time[i] = r.quiescent_time;
+            st.stop_time[i] = r.stop_time;
+            st.stop[i] = r.stop;
             st.events[i] = r.events;
             const auto off = static_cast<std::ptrdiff_t>(i * S);
             std::copy(r.first_zero.begin(), r.first_zero.end(), st.first_zero.begin() + off);
@@ -222,6 +258,7 @@ EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
 
             for (std::size_t g = 0; g < G && g < r.traj.rows(); ++g) {
                 const double* row = r.traj.row(g);
+                cnt[w][g] += 1.0;
                 for (std::size_t sp = 0; sp < S; ++sp) {
                     const double v = row[sp];
                     sum[w][g * S + sp] += v;
@@ -242,20 +279,31 @@ EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
 
     st.wall_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
+    // Runs cut short by a cap stop contributing, so each grid point is
+    // averaged over the runs that actually reached it rather than over n_runs.
+    // Dividing by n_runs throughout would drag the tail of the mean toward
+    // zero for a reason that has nothing to do with the chemistry.
     if (G > 0) {
-        st.mean.assign(G * S, 0.0);
-        st.sd.assign(G * S, 0.0);
-        const double n = static_cast<double>(n_runs);
-        for (std::size_t i = 0; i < G * S; ++i) {
-            double s1 = 0.0, s2 = 0.0;
-            for (unsigned w = 0; w < n_threads; ++w) {
-                s1 += sum[w][i];
-                s2 += sumsq[w][i];
+        st.mean.assign(G * S, kNaN);
+        st.sd.assign(G * S, kNaN);
+        st.grid_n.assign(G, 0.0);
+        for (std::size_t g = 0; g < G; ++g) {
+            double n = 0.0;
+            for (unsigned w = 0; w < n_threads; ++w) n += cnt[w][g];
+            st.grid_n[g] = n;
+            if (n < 1.0) continue;
+            for (std::size_t sp = 0; sp < S; ++sp) {
+                const std::size_t i = g * S + sp;
+                double s1 = 0.0, s2 = 0.0;
+                for (unsigned w = 0; w < n_threads; ++w) {
+                    s1 += sum[w][i];
+                    s2 += sumsq[w][i];
+                }
+                const double m = s1 / n;
+                st.mean[i] = m;
+                const double var = n > 1.0 ? (s2 - n * m * m) / (n - 1.0) : 0.0;
+                st.sd[i] = std::sqrt(var > 0.0 ? var : 0.0);
             }
-            const double m = s1 / n;
-            st.mean[i] = m;
-            const double var = n > 1.0 ? (s2 - n * m * m) / (n - 1.0) : 0.0;
-            st.sd[i] = std::sqrt(var > 0.0 ? var : 0.0);
         }
     }
 

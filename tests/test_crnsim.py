@@ -76,17 +76,17 @@ def first_event_mean(reactions, init, runs=4000, seed=11):
     """Mean waiting time for a network in which exactly one reaction can ever fire.
 
     Each network below is rigged so that firing once empties a reactant and
-    leaves an absorbing state, which makes the recorded quiescent time the
-    waiting time for a single exponential clock of rate a -- mean exactly 1/a.
+    leaves an absorbing state, which makes the recorded stop time the waiting
+    time for a single exponential clock of rate a -- mean exactly 1/a.
     """
     path = net(f"tend 1000\ninit {init}\n{reactions}\n")
     run("--network", path, "--ensemble", runs, "--seed", seed,
         "--ensemble-out", out("e.csv"))
     df = pd.read_csv(out("e.csv"))
-    assert df["quiescent_time"].notna().all(), "expected every run to absorb"
+    assert (df["stop"] == "absorbing").all(), "expected every run to absorb"
     assert (df["events"] == 1).all(), \
         f"the network must admit exactly one event, saw {sorted(df['events'].unique())}"
-    return df["quiescent_time"].mean(), df["quiescent_time"].std() / math.sqrt(runs)
+    return df["stop_time"].mean(), df["stop_time"].std() / math.sqrt(runs)
 
 
 def test_unimolecular():
@@ -243,7 +243,7 @@ def test_absorbing_state_stops_the_run():
     -log(u)/0 and the loop spins forever.
     """
     _, err = run("--network", "approximate-majority", "--seed", 4, "--out", out("a.csv"))
-    assert "absorbing state reached at t =" in err, err
+    assert "stopped on absorbing at t =" in err, err
 
     df = pd.read_csv(out("a.csv"))
     last = df.iloc[-1]
@@ -256,7 +256,40 @@ def test_absorbing_at_t_zero():
     """A network with nothing to fire must stop at t = 0, not spin."""
     path = net("tend 100\ninit X=0\nX -> 0 ; k = 1\n")
     _, err = run("--network", path, "--out", out("z.csv"))
-    assert "absorbing state reached at t = 0" in err, err
+    assert "stopped on absorbing at t = 0" in err, err
+
+
+def test_population_cap():
+    """Unbounded growth must be caught, not run until the heat death.
+
+    X -> 2X is a pure Yule process: the count grows without bound and the
+    propensity grows with it, so t_end is never reached. This is what
+    Lotka-Volterra prey does once the predators are gone.
+    """
+    path = net("tend 1000\ninit X=1\nX -> 2X ; k = 1\n")
+    _, err = run("--network", path, "--max-count", 10000, "--out", out("p.csv"))
+    assert "stopped on population-cap" in err, err
+    df = pd.read_csv(out("p.csv"))
+    assert df["X"].max() > 10000, "should stop just past the cap"
+    assert df["X"].max() < 10002, "should stop just past the cap, not far past it"
+
+
+def test_capped_runs_do_not_pad_the_grid():
+    """A run killed by the cap has no trajectory past its stop time.
+
+    Padding it to t_end with the frozen final count would invent data, and
+    would drag the ensemble mean with it -- so the grid stats carry an `n`
+    column saying how many runs actually reached each point.
+    """
+    path = net("tend 1000\ninit X=1\nX -> 2X ; k = 1\n")
+    run("--network", path, "--ensemble", 20, "--max-count", 1000,
+        "--stats-out", out("cap.csv"), "--grid-dt", 50)
+    df = pd.read_csv(out("cap.csv"))
+    assert df["n"].iloc[0] == 20, f"every run should reach t=0, got {df['n'].iloc[0]}"
+    assert df["n"].iloc[-1] == 0, \
+        f"no run should survive to t_end, got {df['n'].iloc[-1]}"
+    # Where no run reached, the mean is empty rather than a fabricated zero.
+    assert pd.isna(df["mean_X"].iloc[-1]), df["mean_X"].iloc[-1]
 
 
 # --- reproducibility -------------------------------------------------------

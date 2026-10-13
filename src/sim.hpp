@@ -21,11 +21,32 @@ struct Trajectory {
     std::size_t rows() const { return t.size(); }
 };
 
+// Why a trajectory stopped. Reaching the horizon is the normal case; the other
+// three are the ways a CRN refuses to get there.
+enum class Stop {
+    Horizon,       // reached t_end
+    Absorbing,     // total propensity hit zero -- nothing can fire again
+    PopulationCap, // a species blew up (e.g. Lotka-Volterra prey after the predators die out)
+    EventCap,      // event budget exhausted
+};
+
+const char* stop_name(Stop s);
+
+struct SsaLimits {
+    // After predator extinction, Lotka-Volterra prey grows as a pure Yule
+    // process: unbounded, with propensity growing as it goes, so t_end is never
+    // reached and the loop never terminates. These caps bound the run instead.
+    Count max_count = 1000000;
+    unsigned long long max_events = 50000000ULL;
+};
+
 struct SsaResult {
     Trajectory traj;                // empty when record == false
     std::vector<Count> final_state;
     std::vector<double> first_zero; // per species; NaN if never hit zero
     double quiescent_time = 0.0;    // time total propensity hit 0; NaN if it never did
+    double stop_time = 0.0;         // time the run actually ended
+    Stop stop = Stop::Horizon;
     unsigned long long events = 0;
 };
 
@@ -34,7 +55,7 @@ struct SsaResult {
 // sample_dt > 0 records the state on a uniform grid (bounded memory, and what
 // ensemble statistics need); sample_dt == 0 records every reaction event.
 SsaResult run_ssa(const Network& net, double t_end, std::uint64_t seed,
-                  double sample_dt, bool record = true);
+                  double sample_dt, bool record = true, SsaLimits limits = {});
 
 // Fourth-order Runge-Kutta on the mass-action ODEs for the same network.
 // dx/dt = sum_j nu_j * flux_j(x). Integrated with step `h`, recorded every
@@ -48,6 +69,8 @@ struct EnsembleStats {
     // Per-run summaries, one entry per trajectory.
     std::vector<std::uint64_t> seeds;
     std::vector<double> quiescent_time;  // NaN when still reacting at t_end
+    std::vector<double> stop_time;
+    std::vector<Stop> stop;
     std::vector<double> first_zero;      // n_runs * n_species, row-major
     std::vector<Count> final_state;      // n_runs * n_species, row-major
     std::vector<unsigned long long> events;
@@ -57,6 +80,7 @@ struct EnsembleStats {
     std::vector<double> grid_t;
     std::vector<double> mean;            // grid_t.size() * n_species
     std::vector<double> sd;              // grid_t.size() * n_species
+    std::vector<double> grid_n;          // runs still alive at each grid point
 
     double wall_seconds = 0.0;
     unsigned threads = 1;
@@ -65,6 +89,7 @@ struct EnsembleStats {
 // Independent trajectories across threads. Each run owns its RNG stream, so
 // results do not depend on the thread count or on scheduling.
 EnsembleStats run_ensemble(const Network& net, double t_end, std::uint64_t seed,
-                           std::size_t n_runs, unsigned n_threads, double grid_dt);
+                           std::size_t n_runs, unsigned n_threads, double grid_dt,
+                           SsaLimits limits = {});
 
 } // namespace crn
