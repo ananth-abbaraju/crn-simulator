@@ -29,6 +29,7 @@ Network:
   --scale OMEGA         volume scaling: counts *= OMEGA, rate constants /= OMEGA^(order-1).
                         Leaves the deterministic trajectory invariant and shrinks
                         relative noise as 1/sqrt(OMEGA). (default: 1)
+  --init SPECIES=COUNT  override an initial count (repeatable)
   --t-end T             simulation horizon (default: per-network)
   --seed N              RNG seed (default: 1)
 
@@ -180,6 +181,7 @@ int main(int argc, char** argv) try {
     std::uint64_t seed = 1;
     std::size_t ensemble = 0;
     SsaLimits limits;
+    std::vector<std::pair<std::string, Count>> init_overrides;
     unsigned threads = std::thread::hardware_concurrency();
     if (threads == 0) threads = 1;
 
@@ -198,6 +200,12 @@ int main(int argc, char** argv) try {
         else if (a == "--ensemble") ensemble = std::stoull(need(argc, argv, i));
         else if (a == "--threads") threads = static_cast<unsigned>(std::stoul(need(argc, argv, i)));
         else if (a == "--grid-dt") grid_dt = std::stod(need(argc, argv, i));
+        else if (a == "--init") {
+            const std::string v = need(argc, argv, i);
+            const auto eq = v.find('=');
+            if (eq == std::string::npos) die("--init wants SPECIES=COUNT, got '" + v + "'");
+            init_overrides.emplace_back(v.substr(0, eq), std::stoll(v.substr(eq + 1)));
+        }
         else if (a == "--max-count") limits.max_count = std::stoll(need(argc, argv, i));
         else if (a == "--max-events") limits.max_events = std::stoull(need(argc, argv, i));
         else if (a == "--scale") scale = std::stod(need(argc, argv, i));
@@ -210,6 +218,11 @@ int main(int argc, char** argv) try {
     }
 
     Network net = load_network(spec);
+    for (const auto& [sp, c] : init_overrides) {
+        const auto it = std::find(net.species.begin(), net.species.end(), sp);
+        if (it == net.species.end()) die("--init: no species '" + sp + "' in this network");
+        net.x0[static_cast<std::size_t>(it - net.species.begin())] = c;
+    }
     rescale(net, scale);
     if (t_end < 0.0) t_end = net.suggested_t_end;
     // Output intervals scale with the horizon, so a network that finishes in
