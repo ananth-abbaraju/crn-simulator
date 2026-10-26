@@ -20,6 +20,9 @@ build:
 test: crnsim
 	@$(PY) tests/test_crnsim.py
 
+demo: crnsim
+	@./scripts/demo.sh
+
 bench: crnsim
 	@./scripts/bench.sh
 
@@ -29,6 +32,6 @@ venv:
 clean:
 	rm -rf build crnsim
 
-.PHONY: clean test bench venv
+.PHONY: clean test demo bench venv
 
 -include $(DEP)
